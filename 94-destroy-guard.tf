@@ -44,7 +44,7 @@ resource "null_resource" "nginx_destroy_guard" {
           -n "${self.triggers.nginx_namespace}" \
           ingress-nginx-controller \
           --ignore-not-found=true 2>/dev/null | wc -l || echo "0")
-        if [ "${COUNT}" -le 1 ]; then
+        if [ "$COUNT" -le 1 ]; then
           echo "  Service NGINX removido."
           break
         fi
