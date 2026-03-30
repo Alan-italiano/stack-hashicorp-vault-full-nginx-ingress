@@ -116,8 +116,6 @@ resource "helm_release" "nginx_ingress" {
               "service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled" = "true"
               "service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout"           = "60"
               "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type"                   = "ip"
-              # Preserva o IP real do cliente via Proxy Protocol v2
-              "service.beta.kubernetes.io/aws-load-balancer-proxy-protocol" = "*"
             },
             length(local.vault_allowed_cidrs) > 0 ? {
               "service.beta.kubernetes.io/aws-load-balancer-source-ranges" = join(",", local.vault_allowed_cidrs)
@@ -154,8 +152,8 @@ resource "helm_release" "nginx_ingress" {
           server-tokens = "false"
           hide-headers  = "X-Powered-By,Server"
 
-          # IP real do cliente via Proxy Protocol (NLB com proxy-protocol: *)
-          use-proxy-protocol         = "true"
+          # IP real do cliente preservado pelo externalTrafficPolicy: Local.
+          # X-Forwarded-For gerado pelo NGINX com o IP de origem do pacote.
           use-forwarded-headers      = "true"
           compute-full-forwarded-for = "true"
           forwarded-for-header       = "X-Forwarded-For"
