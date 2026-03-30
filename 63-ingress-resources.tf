@@ -1,13 +1,14 @@
 # ── Ingress: Vault ────────────────────────────────────────────────────────────
 # NGINX termina TLS público (cert-manager / Let's Encrypt) e re-encripta
 # para o backend Vault (HTTPS interno com CA própria).
+# Security headers são injetados globalmente via ConfigMap add-headers
+# (veja 61-nginx-ingress.tf) — sem configuration-snippet por ingress.
 
 resource "kubernetes_ingress_v1" "vault" {
   metadata {
     name      = "vault-nginx"
     namespace = kubernetes_namespace.vault.metadata[0].name
     annotations = {
-      # IngressClass
       "kubernetes.io/ingress.class" = "nginx"
 
       # TLS terminado no NGINX → backend Vault em HTTPS (re-encrypt)
@@ -24,22 +25,9 @@ resource "kubernetes_ingress_v1" "vault" {
       "nginx.ingress.kubernetes.io/limit-rps"         = tostring(var.nginx_rate_limit_rps)
       "nginx.ingress.kubernetes.io/limit-connections" = tostring(var.nginx_rate_limit_connections)
 
-      # Healthcheck (Vault retorna 200/204/429 quando healthy/standby)
-      "nginx.ingress.kubernetes.io/healthcheck-path" = "/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204"
-
-      # Timeouts agressivos para API de secrets
+      # Timeouts para API de secrets
       "nginx.ingress.kubernetes.io/proxy-read-timeout" = "60"
       "nginx.ingress.kubernetes.io/proxy-body-size"    = "10m"
-
-      # Cabeçalhos de segurança adicionais por ingress
-      "nginx.ingress.kubernetes.io/configuration-snippet" = <<-SNIPPET
-        more_set_headers "X-Frame-Options: DENY";
-        more_set_headers "X-Content-Type-Options: nosniff";
-        more_set_headers "X-XSS-Protection: 0";
-        more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
-        more_set_headers "Permissions-Policy: geolocation=(), microphone=(), camera=()";
-        more_set_headers "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;";
-      SNIPPET
 
       # cert-manager emite certificado público via Let's Encrypt DNS-01
       "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
@@ -110,16 +98,8 @@ resource "kubernetes_ingress_v1" "grafana" {
       "nginx.ingress.kubernetes.io/limit-rps"        = tostring(var.nginx_rate_limit_rps)
       "nginx.ingress.kubernetes.io/limit-connections" = tostring(var.nginx_rate_limit_connections)
 
-      # Segurança extra para o dashboard de monitoramento
-      "nginx.ingress.kubernetes.io/configuration-snippet" = <<-SNIPPET
-        more_set_headers "X-Frame-Options: SAMEORIGIN";
-        more_set_headers "X-Content-Type-Options: nosniff";
-        more_set_headers "X-XSS-Protection: 0";
-        more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
-      SNIPPET
-
-      "cert-manager.io/cluster-issuer"                   = "letsencrypt-prod"
-      "external-dns.alpha.kubernetes.io/hostname"        = var.grafana_hostname
+      "cert-manager.io/cluster-issuer"            = "letsencrypt-prod"
+      "external-dns.alpha.kubernetes.io/hostname" = var.grafana_hostname
     }
   }
 

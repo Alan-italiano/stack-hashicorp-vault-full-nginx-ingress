@@ -128,11 +128,9 @@ resource "helm_release" "nginx_ingress" {
 
         # ── ConfigMap global de segurança ─────────────────────────────────────
         config = {
-          # Habilita configuration-snippet por ingress.
-          # Desabilitado por padrão no ingress-nginx >= 1.2 para ambientes
-          # multi-tenant. Aqui é seguro pois apenas Vault e Grafana usam
-          # snippets para injetar security headers (X-Frame-Options, CSP…).
-          allow-snippet-annotations = "true"
+          # Security headers globais via add-headers (ConfigMap separado).
+          # Método oficial sem configuration-snippet — aplica em todas as respostas.
+          add-headers = "${local.nginx_ingress_namespace}/nginx-security-headers"
 
           # Protocolo e cifras TLS
           ssl-protocols = "TLSv1.2 TLSv1.3"
@@ -221,8 +219,31 @@ resource "helm_release" "nginx_ingress" {
 
   depends_on = [
     kubernetes_namespace.nginx_ingress,
+    kubernetes_config_map_v1.nginx_security_headers,
     time_sleep.eks_access_ready,
   ]
+}
+
+# ── Security headers ConfigMap (add-headers) ──────────────────────────────────
+# Método oficial para injetar response headers sem configuration-snippet.
+# O controller lê este ConfigMap via config.add-headers e adiciona os
+# headers em todas as respostas, independente do ingress.
+
+resource "kubernetes_config_map_v1" "nginx_security_headers" {
+  metadata {
+    name      = "nginx-security-headers"
+    namespace = local.nginx_ingress_namespace
+  }
+
+  data = {
+    "X-Frame-Options"           = "SAMEORIGIN"
+    "X-Content-Type-Options"    = "nosniff"
+    "X-XSS-Protection"          = "0"
+    "Referrer-Policy"           = "strict-origin-when-cross-origin"
+    "Permissions-Policy"        = "geolocation=(), microphone=(), camera=()"
+  }
+
+  depends_on = [kubernetes_namespace.nginx_ingress]
 }
 
 # ── External DNS ──────────────────────────────────────────────────────────────
