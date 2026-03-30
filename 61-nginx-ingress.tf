@@ -174,18 +174,7 @@ resource "helm_release" "nginx_ingress" {
           # ModSecurity WAF (OWASP CRS)
           enable-modsecurity          = tostring(var.nginx_enable_modsecurity)
           enable-owasp-modsecurity-crs = tostring(var.nginx_enable_modsecurity)
-          modsecurity-snippet = var.nginx_enable_modsecurity ? <<-MODSEC
-            SecRuleEngine On
-            SecRequestBodyAccess On
-            SecResponseBodyAccess Off
-            SecRequestBodyLimit 13107200
-            SecRequestBodyNoFilesLimit 131072
-            SecPcreMatchLimit 100000
-            SecPcreMatchLimitRecursion 100000
-            # Evita falsos positivos do Vault API (body JSON grande)
-            SecRule REQUEST_URI "@beginsWith /v1/" "id:9001,phase:1,pass,nolog,ctl:requestBodyAccess=On"
-          MODSEC
-          : ""
+          modsecurity-snippet = local.nginx_modsecurity_snippet
         }
 
         # ── Métricas Prometheus ───────────────────────────────────────────────
