@@ -174,12 +174,14 @@ resource "helm_release" "nginx_ingress" {
         }
 
         # ── Métricas Prometheus ───────────────────────────────────────────────
+        # ServiceMonitor desabilitado: CRD monitoring.coreos.com/v1 ainda não
+        # existe quando este chart é instalado (antes do kube-prometheus-stack).
+        # O endpoint /metrics fica exposto e o Prometheus o descobre via
+        # podMonitorNamespaceSelector aberto configurado no stack de monitoring.
         metrics = {
           enabled = true
           serviceMonitor = {
-            enabled            = true
-            additionalLabels   = {}
-            namespaceSelector  = {}
+            enabled = false
           }
         }
 

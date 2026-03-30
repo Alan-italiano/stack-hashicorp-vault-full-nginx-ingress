@@ -32,10 +32,14 @@ resource "helm_release" "cert_manager" {
       podLabels = {
         "app.kubernetes.io/component" = "controller"
       }
+      # ServiceMonitor desabilitado: o CRD monitoring.coreos.com/v1 só existe
+      # após o kube-prometheus-stack ser instalado, mas este chart é pré-requisito
+      # dele — dependência circular. O Prometheus coleta cert-manager via
+      # podMonitorNamespaceSelector aberto configurado no kube-prometheus-stack.
       prometheus = {
-        enabled = true
+        enabled = false
         servicemonitor = {
-          enabled = true
+          enabled = false
         }
       }
     })
