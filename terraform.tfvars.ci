@@ -1,0 +1,49 @@
+# ============================================================
+# terraform.tfvars.ci
+# Valores não-sensíveis para uso no GitHub Actions.
+# Committed no repositório — NÃO inclua secrets aqui.
+#
+# Valores sensíveis são injetados pelo workflow via secrets:
+#   postgres_admin_password   → secret: POSTGRES_ADMIN_PASSWORD
+#   vault_oidc_client_secret  → secret: VAULT_OIDC_CLIENT_SECRET
+# ============================================================
+
+# AWS / EKS
+region       = "us-east-1"
+cluster_name = "vault-eks-lab"
+
+# S3 — Vault Snapshots
+vault_snapshot_bucket_name                 = "vault-lab-snapshots-unique"
+vault_snapshot_bucket_admin_principal_arns = []
+
+# DNS / Route53
+route53_zone_id  = "Z085094335FXPD3PXEQRT"
+domain_name      = "lab-internal.com.br"
+vault_hostname   = "vault.lab-internal.com.br"
+grafana_hostname = "grafana.lab-internal.com.br"
+
+# cert-manager / Let's Encrypt
+letsencrypt_email = "alan.and.costa@gmail.com"
+
+# NGINX Ingress
+nginx_ingress_replica_count = 3
+nginx_enable_modsecurity    = true
+nginx_rate_limit_rps        = 20
+nginx_scheme                = "internet-facing"
+vault_allowed_cidrs         = []
+
+# Vault
+vault_image_tag = "1.21.4"
+
+# PostgreSQL (acesso interno apenas — sem NLB externo)
+postgres_database_name  = "psdb"
+postgres_admin_username = "psuser"
+
+# Bootstrap desabilitado no null_resource — o workflow executa como step separado
+# com kubeconfig configurado e retry automático.
+vault_bootstrap_enabled = false
+
+# Vault OIDC (Auth0) — client_id e discovery_url são públicos por spec OAuth2
+vault_oidc_discovery_url = "https://dev-xshlmenrpahbcg1d.us.auth0.com/"
+vault_oidc_client_id     = "h38ZpE10ODF1fShcYTUZ5M5vyKGrka0U"
+vault_oidc_bound_email   = "alan.and.costa@gmail.com"

@@ -1,0 +1,33 @@
+# OpenTofu / Terraform working directory
+.terraform/
+
+# State files
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local variable files with secrets
+*.tfvars
+*.tfvars.json
+
+# Keep shareable examples and CI var files
+!*.tfvars.example
+!*.tfvars.ci
+
+# Sensitive bootstrap outputs and local logs
+bootstrap/vault-init.json
+bootstrap/vault-bootstrap.log
+bootstrap/*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS / editor noise
+.DS_Store
+Thumbs.db

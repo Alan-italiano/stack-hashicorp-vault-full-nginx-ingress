@@ -1,0 +1,268 @@
+name: Terraform Apply
+
+# Execução apenas manual — sem agendamento automático.
+on:
+  workflow_dispatch:
+
+# Evita execuções paralelas que corrompem o state.
+concurrency:
+  group: terraform
+  cancel-in-progress: false
+
+# ── Secrets obrigatórios (Settings → Secrets and variables → Actions) ─────────
+#
+#   AWS_ACCESS_KEY_ID          Chave de acesso AWS
+#   AWS_SECRET_ACCESS_KEY      Secret da chave AWS
+#   TF_STATE_BUCKET            Bucket S3 para o Terraform state
+#   POSTGRES_ADMIN_PASSWORD    Senha do administrador do PostgreSQL
+#   VAULT_OIDC_CLIENT_SECRET   Client secret do provedor OIDC (opcional)
+#
+# ──────────────────────────────────────────────────────────────────────────────
+
+env:
+  TOFU_VERSION:    "1.8.3"
+  KUBECTL_VERSION: "v1.30.9"
+  AWS_REGION:      "us-east-1"
+  CLUSTER_NAME:    "vault-eks-lab"
+  TF_STATE_KEY:    "vault-eks-nginx-lab/terraform.tfstate"
+  # Bootstrap desabilitado no null_resource — roda como step separado abaixo.
+  TF_VAR_vault_bootstrap_enabled: "false"
+
+jobs:
+  apply:
+    name: Plan & Apply
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      # ── 1. Código ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Ferramentas ────────────────────────────────────────────────────
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install requests
+
+      # ── 3. Credenciais AWS ────────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      # ── 4. Garante que o bucket de state S3 existe ────────────────────────
+      - name: Ensure Terraform state bucket exists
+        run: |
+          BUCKET="${{ secrets.TF_STATE_BUCKET }}"
+          REGION="${{ env.AWS_REGION }}"
+
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "Bucket $BUCKET já existe."
+          else
+            echo "Criando bucket $BUCKET em $REGION..."
+            if [[ "$REGION" == "us-east-1" ]]; then
+              aws s3api create-bucket --bucket "$BUCKET" --region "$REGION"
+            else
+              aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
+                --create-bucket-configuration LocationConstraint="$REGION"
+            fi
+          fi
+
+          aws s3api put-bucket-versioning \
+            --bucket "$BUCKET" \
+            --versioning-configuration Status=Enabled
+
+          aws s3api put-public-access-block \
+            --bucket "$BUCKET" \
+            --public-access-block-configuration \
+              BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+          echo "Bucket $BUCKET pronto."
+
+      # ── 5. Terraform Init ─────────────────────────────────────────────────
+      - name: Terraform Init
+        run: |
+          tofu init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ env.TF_STATE_KEY }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -upgrade
+        env:
+          TF_VAR_postgres_admin_password:  ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          TF_VAR_vault_oidc_client_secret: ${{ secrets.VAULT_OIDC_CLIENT_SECRET }}
+
+      # ── 6. Terraform Plan ─────────────────────────────────────────────────
+      - name: Terraform Plan
+        run: |
+          tofu plan \
+            -var-file=terraform.tfvars.ci \
+            -out=tfplan \
+            2>&1 | tee plan_output.txt
+        env:
+          TF_VAR_postgres_admin_password:  ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          TF_VAR_vault_oidc_client_secret: ${{ secrets.VAULT_OIDC_CLIENT_SECRET }}
+
+      - name: Publish plan summary
+        run: |
+          {
+            echo "### Terraform Plan — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            echo '```'
+            grep -E "(#|Plan:|No changes)" plan_output.txt | head -80 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 7. Terraform Apply (sem bootstrap) ────────────────────────────────
+      - name: Terraform Apply
+        run: tofu apply -auto-approve tfplan
+        env:
+          TF_VAR_postgres_admin_password:  ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          TF_VAR_vault_oidc_client_secret: ${{ secrets.VAULT_OIDC_CLIENT_SECRET }}
+
+      # ── 8. kubeconfig ────────────────────────────────────────────────────
+      - name: Configure kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # ── 9. Aguarda NLB do NGINX estar pronto ──────────────────────────────
+      - name: Wait for NGINX Ingress NLB to be provisioned
+        run: |
+          echo "Aguardando NLB do ingress-nginx-controller receber hostname (timeout 5min)..."
+          for i in $(seq 1 30); do
+            NLB_HOST=$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            if [ -n "$NLB_HOST" ]; then
+              echo "NLB provisionado: $NLB_HOST"
+              break
+            fi
+            echo "  Aguardando... ($i/30)"
+            sleep 10
+          done
+
+      # ── 10. Aguarda Vault Ready ────────────────────────────────────────────
+      - name: Wait for Vault pods Ready
+        run: |
+          VAULT_NS=$(tofu output -raw vault_namespace)
+          echo "Aguardando vault-0 ficar Ready no namespace ${VAULT_NS} (timeout 10min)..."
+          kubectl wait pod/vault-0 \
+            --namespace "${VAULT_NS}" \
+            --for=condition=Ready \
+            --timeout=600s
+
+      # ── 11. Coleta todos os parâmetros do Terraform state ──────────────────
+      - name: Collect bootstrap parameters from Terraform outputs
+        id: tf_outputs
+        run: |
+          echo "cluster_endpoint=$(tofu output -raw eks_cluster_endpoint)"              >> "$GITHUB_OUTPUT"
+          echo "k8s_ca_b64=$(tofu output -raw eks_cluster_certificate_authority_data)"  >> "$GITHUB_OUTPUT"
+          echo "vault_namespace=$(tofu output -raw vault_namespace)"                    >> "$GITHUB_OUTPUT"
+          echo "vault_service_account=$(tofu output -raw vault_service_account)"        >> "$GITHUB_OUTPUT"
+          echo "vault_hostname=$(tofu output -raw vault_hostname)"                      >> "$GITHUB_OUTPUT"
+          echo "postgres_host=$(tofu output -raw postgres_internal_host)"               >> "$GITHUB_OUTPUT"
+          echo "postgres_port=$(tofu output -raw postgres_internal_port)"               >> "$GITHUB_OUTPUT"
+          echo "postgres_database=$(tofu output -raw postgres_database_name)"           >> "$GITHUB_OUTPUT"
+          echo "postgres_username=$(tofu output -raw postgres_admin_username)"          >> "$GITHUB_OUTPUT"
+          echo "oidc_discovery_url=$(tofu output -raw vault_oidc_discovery_url)"        >> "$GITHUB_OUTPUT"
+          echo "oidc_client_id=$(tofu output -raw vault_oidc_client_id)"                >> "$GITHUB_OUTPUT"
+          echo "oidc_bound_email=$(tofu output -raw vault_oidc_bound_email)"            >> "$GITHUB_OUTPUT"
+          echo "oidc_role_name=$(tofu output -raw vault_oidc_role_name)"                >> "$GITHUB_OUTPUT"
+
+      # ── 12. Bootstrap do Vault ─────────────────────────────────────────────
+      - name: Vault Bootstrap
+        id: bootstrap
+        run: |
+          VAULT_CA_B64=$(kubectl get secret vault-server-tls \
+            -n "${{ steps.tf_outputs.outputs.vault_namespace }}" \
+            -o jsonpath='{.data.ca\.crt}' 2>/dev/null || echo "")
+
+          python3 ./scripts/bootstrap_vault.py \
+            --namespace            "${{ steps.tf_outputs.outputs.vault_namespace }}" \
+            --service-account      "${{ steps.tf_outputs.outputs.vault_service_account }}" \
+            --cluster-name         "${{ env.CLUSTER_NAME }}" \
+            --region               "${{ env.AWS_REGION }}" \
+            --kubernetes-host      "${{ steps.tf_outputs.outputs.cluster_endpoint }}" \
+            --kubernetes-ca-b64    "${{ steps.tf_outputs.outputs.k8s_ca_b64 }}" \
+            --vault-ca-cert-b64    "${VAULT_CA_B64}" \
+            --output-file          "/tmp/vault-init.json" \
+            --output-s3-uri        "s3://${{ secrets.TF_STATE_BUCKET }}/vault-bootstrap/vault-init.json" \
+            --postgres-host        "${{ steps.tf_outputs.outputs.postgres_host }}" \
+            --postgres-port        "${{ steps.tf_outputs.outputs.postgres_port }}" \
+            --postgres-database-name "${{ steps.tf_outputs.outputs.postgres_database }}" \
+            --postgres-admin-username "${{ steps.tf_outputs.outputs.postgres_username }}" \
+            --postgres-admin-password "${{ secrets.POSTGRES_ADMIN_PASSWORD }}" \
+            --vault-db-connection-name "postgres" \
+            --vault-db-role-name   "postgres-dynamic" \
+            --vault-hostname       "${{ steps.tf_outputs.outputs.vault_hostname }}" \
+            --oidc-discovery-url   "${{ steps.tf_outputs.outputs.oidc_discovery_url }}" \
+            --oidc-client-id       "${{ steps.tf_outputs.outputs.oidc_client_id }}" \
+            --oidc-client-secret   "${{ secrets.VAULT_OIDC_CLIENT_SECRET }}" \
+            --oidc-bound-email     "${{ steps.tf_outputs.outputs.oidc_bound_email }}" \
+            --oidc-role-name       "${{ steps.tf_outputs.outputs.oidc_role_name }}"
+
+      # ── 13. Retry do bootstrap se falhou ──────────────────────────────────
+      - name: Vault Bootstrap (retry)
+        if: failure() && steps.bootstrap.outcome == 'failure'
+        run: |
+          echo "Primeira tentativa falhou. Aguardando 60s e tentando novamente..."
+          sleep 60
+
+          VAULT_CA_B64=$(kubectl get secret vault-server-tls \
+            -n "${{ steps.tf_outputs.outputs.vault_namespace }}" \
+            -o jsonpath='{.data.ca\.crt}' 2>/dev/null || echo "")
+
+          python3 ./scripts/bootstrap_vault.py \
+            --namespace            "${{ steps.tf_outputs.outputs.vault_namespace }}" \
+            --service-account      "${{ steps.tf_outputs.outputs.vault_service_account }}" \
+            --cluster-name         "${{ env.CLUSTER_NAME }}" \
+            --region               "${{ env.AWS_REGION }}" \
+            --kubernetes-host      "${{ steps.tf_outputs.outputs.cluster_endpoint }}" \
+            --kubernetes-ca-b64    "${{ steps.tf_outputs.outputs.k8s_ca_b64 }}" \
+            --vault-ca-cert-b64    "${VAULT_CA_B64}" \
+            --output-file          "/tmp/vault-init.json" \
+            --output-s3-uri        "s3://${{ secrets.TF_STATE_BUCKET }}/vault-bootstrap/vault-init.json" \
+            --postgres-host        "${{ steps.tf_outputs.outputs.postgres_host }}" \
+            --postgres-port        "${{ steps.tf_outputs.outputs.postgres_port }}" \
+            --postgres-database-name "${{ steps.tf_outputs.outputs.postgres_database }}" \
+            --postgres-admin-username "${{ steps.tf_outputs.outputs.postgres_username }}" \
+            --postgres-admin-password "${{ secrets.POSTGRES_ADMIN_PASSWORD }}" \
+            --vault-db-connection-name "postgres" \
+            --vault-db-role-name   "postgres-dynamic" \
+            --vault-hostname       "${{ steps.tf_outputs.outputs.vault_hostname }}" \
+            --oidc-discovery-url   "${{ steps.tf_outputs.outputs.oidc_discovery_url }}" \
+            --oidc-client-id       "${{ steps.tf_outputs.outputs.oidc_client_id }}" \
+            --oidc-client-secret   "${{ secrets.VAULT_OIDC_CLIENT_SECRET }}" \
+            --oidc-bound-email     "${{ steps.tf_outputs.outputs.oidc_bound_email }}" \
+            --oidc-role-name       "${{ steps.tf_outputs.outputs.oidc_role_name }}"
+
+      # ── 14. Outputs ────────────────────────────────────────────────────────
+      - name: Terraform Outputs
+        if: always()
+        run: |
+          {
+            echo "### Terraform Outputs"
+            echo '```'
+            tofu output 2>/dev/null || echo "(outputs indisponíveis)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TF_VAR_postgres_admin_password:  ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          TF_VAR_vault_oidc_client_secret: ${{ secrets.VAULT_OIDC_CLIENT_SECRET }}

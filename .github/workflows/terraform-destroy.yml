@@ -1,0 +1,296 @@
+name: Terraform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Digite "DESTROY" para confirmar a destruição de toda a infraestrutura'
+        required: true
+        type: string
+
+concurrency:
+  group: terraform
+  cancel-in-progress: false
+
+env:
+  TOFU_VERSION:    "1.8.3"
+  KUBECTL_VERSION: "v1.30.9"
+  AWS_REGION:      "us-east-1"
+  CLUSTER_NAME:    "vault-eks-lab"
+  TF_STATE_KEY:    "vault-eks-nginx-lab/terraform.tfstate"
+
+jobs:
+  destroy:
+    name: Plan & Destroy
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ── 0. Validação de segurança ─────────────────────────────────────────
+      - name: Validate confirmation
+        run: |
+          if [[ "${{ inputs.confirm }}" != "DESTROY" ]]; then
+            echo "Confirmação inválida. Você deve digitar exatamente DESTROY para prosseguir."
+            exit 1
+          fi
+
+      # ── 1. Checkout + ferramentas ──────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      # ── 2. Credenciais AWS ────────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      # ── 3. Terraform Init ─────────────────────────────────────────────────
+      - name: Terraform Init
+        run: |
+          tofu init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ env.TF_STATE_KEY }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -upgrade
+        env:
+          TF_VAR_postgres_admin_password:  ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          TF_VAR_vault_oidc_client_secret: ${{ secrets.VAULT_OIDC_CLIENT_SECRET }}
+
+      # ── 4. Captura status do cluster e VPC ID ────────────────────────────
+      - name: Get cluster info
+        id: cluster
+        run: |
+          CLUSTER_STATUS=$(timeout 20 aws eks describe-cluster \
+            --name "${{ env.CLUSTER_NAME }}" \
+            --query "cluster.status" \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+
+          VPC_ID=$(timeout 20 aws eks describe-cluster \
+            --name "${{ env.CLUSTER_NAME }}" \
+            --query "cluster.resourcesVpcConfig.vpcId" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            VPC_ID=$(aws ec2 describe-vpcs \
+              --filters "Name=tag:Name,Values=${{ env.CLUSTER_NAME }}" \
+              --query "Vpcs[0].VpcId" \
+              --output text 2>/dev/null || echo "")
+          fi
+
+          echo "cluster_status=$CLUSTER_STATUS" >> "$GITHUB_OUTPUT"
+          echo "vpc_id=$VPC_ID"                 >> "$GITHUB_OUTPUT"
+          echo "Cluster: $CLUSTER_STATUS | VPC: $VPC_ID"
+
+      # ── 5. Pré-destroy: remove Ingresses e Service NGINX (NLB) ───────────
+      # Objetivo: deixar o AWS Cloud Provider Controller remover o NLB via
+      # API Kubernetes antes de destruirmos os nodes/VPC.
+      # Sem este passo, o NLB poderia ficar órfão bloqueando a deleção da VPC.
+      - name: Pre-destroy - remove Ingresses and NGINX Service (NLB)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          CLUSTER_STATUS="${{ steps.cluster.outputs.cluster_status }}"
+          if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+            echo "Cluster não está ACTIVE ($CLUSTER_STATUS) — pulando kubectl."
+            exit 0
+          fi
+
+          timeout 30 aws eks update-kubeconfig \
+            --name "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}" || {
+            echo "Falha ao configurar kubeconfig — pulando kubectl."
+            exit 0
+          }
+
+          # Remove Ingresses (External DNS limpará registros Route53)
+          timeout 15 kubectl delete ingress vault-nginx \
+            -n vault --ignore-not-found 2>/dev/null || true
+
+          timeout 15 kubectl delete ingress grafana-nginx \
+            -n monitoring --ignore-not-found 2>/dev/null || true
+
+          echo "Aguardando External DNS limpar Route53 (30s)..."
+          sleep 30
+
+          # Remove o Service do NGINX para desprovicionar o NLB
+          timeout 15 kubectl delete svc ingress-nginx-controller \
+            -n ingress-nginx --ignore-not-found 2>/dev/null || true
+
+          echo "Aguardando NLB ser removido (até 3min)..."
+          for i in $(seq 1 18); do
+            REMAINING=$(timeout 10 kubectl get svc ingress-nginx-controller \
+              -n ingress-nginx --ignore-not-found 2>/dev/null | wc -l || echo "0")
+            if [ "${REMAINING}" -le "1" ]; then
+              echo "  NLB removido."
+              break
+            fi
+            echo "  Aguardando... ($i/18)"
+            sleep 10
+          done
+
+          echo "Recursos Kubernetes processados."
+
+      # ── 6. Force-delete NLBs e Target Groups remanescentes na VPC ─────────
+      - name: Pre-destroy - force delete NLBs and Target Groups
+        run: |
+          VPC_ID="${{ steps.cluster.outputs.vpc_id }}"
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            echo "VPC não encontrada — sem LBs para limpar."
+            exit 0
+          fi
+
+          LB_ARNS=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$LB_ARNS" ]; then
+            echo "Aguardando até 90s pela remoção automática do NLB..."
+            sleep 90
+            LB_ARNS=$(aws elbv2 describe-load-balancers \
+              --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn" \
+              --output text 2>/dev/null || echo "")
+          fi
+
+          if [ -n "$LB_ARNS" ]; then
+            for ARN in $LB_ARNS; do
+              echo "  Forçando deleção LB: $ARN"
+              aws elbv2 delete-load-balancer --load-balancer-arn "$ARN" || true
+            done
+            echo "Aguardando 60s para ENIs dos NLBs serem liberadas..."
+            sleep 60
+          fi
+
+          TG_ARNS=$(aws elbv2 describe-target-groups \
+            --query "TargetGroups[?VpcId=='$VPC_ID'].TargetGroupArn" \
+            --output text 2>/dev/null || echo "")
+          for TG_ARN in $TG_ARNS; do
+            echo "  Deletando Target Group: $TG_ARN"
+            aws elbv2 delete-target-group --target-group-arn "$TG_ARN" || true
+          done
+
+      # ── 7. Pré-deleta EKS node groups e aguarda ENIs liberarem ────────────
+      - name: Pre-destroy - delete EKS node groups and wait
+        run: |
+          NODE_GROUPS=$(aws eks list-nodegroups \
+            --cluster-name "${{ env.CLUSTER_NAME }}" \
+            --query "nodegroups[]" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$NODE_GROUPS" ]; then
+            echo "Nenhum node group encontrado — pulando."
+            exit 0
+          fi
+
+          for NG in $NODE_GROUPS; do
+            echo "Deletando node group: $NG"
+            aws eks delete-nodegroup \
+              --cluster-name "${{ env.CLUSTER_NAME }}" \
+              --nodegroup-name "$NG" 2>/dev/null \
+              || echo "  Ignorado (já deletado ou erro)."
+          done
+
+          echo "Aguardando conclusão da deleção (timeout: 30min)..."
+          for NG in $NODE_GROUPS; do
+            echo "  Aguardando: $NG"
+            aws eks wait nodegroup-deleted \
+              --cluster-name "${{ env.CLUSTER_NAME }}" \
+              --nodegroup-name "$NG" 2>/dev/null \
+              || echo "  $NG já inexistente."
+          done
+
+          echo "Todos os node groups deletados. ENIs das instâncias liberadas."
+
+      # ── 8. Remove volumes EBS órfãos de PVCs ─────────────────────────────
+      - name: Pre-destroy - delete orphaned EBS volumes from PVCs
+        run: |
+          VOL_IDS=$(aws ec2 describe-volumes \
+            --filters \
+              "Name=tag:kubernetes.io/cluster/${{ env.CLUSTER_NAME }},Values=owned" \
+              "Name=status,Values=available" \
+            --query "Volumes[*].VolumeId" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$VOL_IDS" ]; then
+            echo "Nenhum volume EBS órfão encontrado."
+            exit 0
+          fi
+
+          for VOL_ID in $VOL_IDS; do
+            echo "  Deletando volume EBS: $VOL_ID"
+            aws ec2 delete-volume --volume-id "$VOL_ID" 2>/dev/null || true
+          done
+          echo "Volumes EBS órfãos removidos."
+
+      # ── 9. Remove recursos Kubernetes/Helm do Terraform state ─────────────
+      - name: Remove Kubernetes and Helm resources from Terraform state
+        run: |
+          K8S_ADDRS=$(tofu state list 2>/dev/null \
+            | grep -E '^(kubernetes_|helm_release\.|kubectl_manifest\.)' || true)
+          if [ -n "$K8S_ADDRS" ]; then
+            echo "$K8S_ADDRS" | while read -r addr; do
+              echo "  Removendo do state: $addr"
+              tofu state rm "$addr" || true
+            done
+          else
+            echo "Nenhum recurso kubernetes_*/helm_release no state."
+          fi
+
+          NG_ADDRS=$(tofu state list 2>/dev/null \
+            | grep 'aws_eks_node_group' || true)
+          if [ -n "$NG_ADDRS" ]; then
+            echo "$NG_ADDRS" | while read -r addr; do
+              echo "  Removendo node group do state: $addr"
+              tofu state rm "$addr" || true
+            done
+          fi
+        env:
+          TF_VAR_postgres_admin_password:  ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          TF_VAR_vault_oidc_client_secret: ${{ secrets.VAULT_OIDC_CLIENT_SECRET }}
+
+      # ── 10. Terraform Plan -destroy ───────────────────────────────────────
+      - name: Terraform Plan (destroy)
+        run: |
+          tofu plan \
+            -destroy \
+            -var-file=terraform.tfvars.ci \
+            -out=destroy.tfplan \
+            2>&1 | tee plan_output.txt
+        env:
+          TF_VAR_postgres_admin_password:  ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          TF_VAR_vault_oidc_client_secret: ${{ secrets.VAULT_OIDC_CLIENT_SECRET }}
+
+      - name: Publish destroy plan summary
+        run: |
+          {
+            echo "### Recursos que serão DESTRUÍDOS — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo '```'
+            grep -E "(#|will be destroyed|Plan:)" plan_output.txt | head -100 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 11. Terraform Destroy ─────────────────────────────────────────────
+      - name: Terraform Destroy
+        run: tofu apply -auto-approve destroy.tfplan
+        env:
+          TF_VAR_postgres_admin_password:  ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+          TF_VAR_vault_oidc_client_secret: ${{ secrets.VAULT_OIDC_CLIENT_SECRET }}
+
+      - name: Destroy completed
+        run: |
+          {
+            echo "### Destroy concluído em $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "Toda a infraestrutura foi removida com sucesso."
+          } >> "$GITHUB_STEP_SUMMARY"

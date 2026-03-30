@@ -1,0 +1,75 @@
+# ============================================================
+# tofu.tfvars.example
+# Copy this file to tofu.tfvars and fill in the values.
+# NEVER commit tofu.tfvars — it is excluded by .gitignore.
+# ============================================================
+
+# -----------------------------------------------------------
+# AWS / EKS
+# -----------------------------------------------------------
+region       = "us-east-1"
+cluster_name = "vault-eks-lab"
+
+# -----------------------------------------------------------
+# S3 — Vault Snapshots
+# -----------------------------------------------------------
+vault_snapshot_bucket_name = "vault-lab-snapshots-unique"
+vault_snapshot_bucket_admin_principal_arns = [
+  "arn:aws:iam::123456789012:user/terraform",
+]
+
+# -----------------------------------------------------------
+# DNS / Route53
+# -----------------------------------------------------------
+route53_zone_id  = "Z085094335FXPD3PXEQRT"
+domain_name      = "lab-internal.com.br"
+vault_hostname   = "vault.lab-internal.com.br"
+grafana_hostname = "grafana.lab-internal.com.br"
+
+# -----------------------------------------------------------
+# cert-manager / Let's Encrypt
+# Email usado para registro da conta ACME e avisos de expiração.
+# -----------------------------------------------------------
+letsencrypt_email = "admin@lab-internal.com.br"
+
+# -----------------------------------------------------------
+# NGINX Ingress Controller
+# -----------------------------------------------------------
+nginx_ingress_replica_count = 3       # mínimo 3 para HA em produção
+nginx_enable_modsecurity    = true    # WAF ModSecurity OWASP CRS
+nginx_rate_limit_rps        = 20      # req/s por IP por ingress
+nginx_rate_limit_connections = 20     # conexões simultâneas por IP por ingress
+nginx_scheme                = "internet-facing"   # ou "internal" para VPN-only
+
+# vault_allowed_cidrs restringe o NLB por IP de origem.
+# Deixe vazio [] para acesso público, ou liste IPs/CIDRs permitidos.
+vault_allowed_cidrs = ["203.0.113.10/32"]
+
+# -----------------------------------------------------------
+# Vault
+# -----------------------------------------------------------
+vault_image_tag = "1.21.4"
+
+# -----------------------------------------------------------
+# PostgreSQL
+# Acesso apenas interno ao cluster (ClusterIP).
+# Use: kubectl port-forward -n postgres svc/postgres-service 5432:5432
+# -----------------------------------------------------------
+postgres_database_name  = "psdb"
+postgres_admin_username = "psuser"
+
+# SENSITIVE: PostgreSQL admin password
+# Recommended: export TF_VAR_postgres_admin_password="your-password" instead of setting it here
+postgres_admin_password = "change-me-strong-password"
+
+# -----------------------------------------------------------
+# Vault OIDC (Auth0 or any OIDC provider) — SENSITIVE
+# -----------------------------------------------------------
+vault_oidc_discovery_url = "https://tenant.us.auth0.com"
+vault_oidc_client_id     = "your-auth0-client-id"
+
+# SENSITIVE: Auth0 / OIDC Client Secret
+# Recommended: export TF_VAR_vault_oidc_client_secret="your-secret" instead of setting it here
+vault_oidc_client_secret = "your-auth0-client-secret"
+
+vault_oidc_bound_email = "admin@lab-internal.com.br"
