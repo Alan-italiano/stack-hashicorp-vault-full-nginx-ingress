@@ -128,6 +128,12 @@ resource "helm_release" "nginx_ingress" {
 
         # ── ConfigMap global de segurança ─────────────────────────────────────
         config = {
+          # Habilita configuration-snippet por ingress.
+          # Desabilitado por padrão no ingress-nginx >= 1.2 para ambientes
+          # multi-tenant. Aqui é seguro pois apenas Vault e Grafana usam
+          # snippets para injetar security headers (X-Frame-Options, CSP…).
+          allow-snippet-annotations = "true"
+
           # Protocolo e cifras TLS
           ssl-protocols = "TLSv1.2 TLSv1.3"
           ssl-ciphers   = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384"
