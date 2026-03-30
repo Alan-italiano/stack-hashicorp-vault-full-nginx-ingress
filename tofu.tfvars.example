@@ -35,9 +35,8 @@ letsencrypt_email = "admin@lab-internal.com.br"
 # -----------------------------------------------------------
 # NGINX Ingress Controller
 # -----------------------------------------------------------
-nginx_ingress_replica_count = 3       # mínimo 3 para HA em produção
-nginx_enable_modsecurity    = true    # WAF ModSecurity OWASP CRS
-nginx_rate_limit_rps        = 20      # req/s por IP por ingress
+nginx_ingress_replica_count  = 3    # mínimo 3 para HA em produção
+nginx_rate_limit_rps         = 20   # req/s por IP por ingress
 nginx_rate_limit_connections = 20     # conexões simultâneas por IP por ingress
 nginx_scheme                = "internet-facing"   # ou "internal" para VPN-only
 

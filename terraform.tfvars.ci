@@ -27,7 +27,6 @@ letsencrypt_email = "alan.and.costa@gmail.com"
 
 # NGINX Ingress
 nginx_ingress_replica_count = 3
-nginx_enable_modsecurity    = true
 nginx_rate_limit_rps        = 20
 nginx_scheme                = "internet-facing"
 vault_allowed_cidrs         = []

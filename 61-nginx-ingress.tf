@@ -171,10 +171,6 @@ resource "helm_release" "nginx_ingress" {
           # Logging estruturado para Loki/Promtail
           log-format-upstream = "$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\" $request_length $request_time [$proxy_upstream_name] [$proxy_alternative_upstream_name] $upstream_addr $upstream_response_length $upstream_response_time $upstream_status $req_id"
 
-          # ModSecurity WAF (OWASP CRS)
-          enable-modsecurity          = tostring(var.nginx_enable_modsecurity)
-          enable-owasp-modsecurity-crs = tostring(var.nginx_enable_modsecurity)
-          modsecurity-snippet = local.nginx_modsecurity_snippet
         }
 
         # ── Métricas Prometheus ───────────────────────────────────────────────

@@ -76,12 +76,6 @@ variable "nginx_rate_limit_connections" {
   default     = 20
 }
 
-variable "nginx_enable_modsecurity" {
-  description = "Enable ModSecurity WAF with OWASP Core Rule Set on the NGINX Ingress Controller"
-  type        = bool
-  default     = true
-}
-
 variable "nginx_scheme" {
   description = "Scheme for the NGINX Ingress NLB (internet-facing or internal)"
   type        = string

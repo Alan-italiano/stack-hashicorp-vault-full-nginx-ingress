@@ -1,7 +1,6 @@
 # ── Ingress: Vault ────────────────────────────────────────────────────────────
 # NGINX termina TLS público (cert-manager / Let's Encrypt) e re-encripta
 # para o backend Vault (HTTPS interno com CA própria).
-# ModSecurity OWASP + rate limiting por IP ativados por ingress.
 
 resource "kubernetes_ingress_v1" "vault" {
   metadata {
@@ -20,10 +19,6 @@ resource "kubernetes_ingress_v1" "vault" {
       # Força redirect HTTP → HTTPS
       "nginx.ingress.kubernetes.io/ssl-redirect"       = "true"
       "nginx.ingress.kubernetes.io/force-ssl-redirect" = "true"
-
-      # WAF ModSecurity por ingress (complementa configuração global)
-      "nginx.ingress.kubernetes.io/enable-modsecurity"       = tostring(var.nginx_enable_modsecurity)
-      "nginx.ingress.kubernetes.io/enable-owasp-core-rules"  = tostring(var.nginx_enable_modsecurity)
 
       # Rate limiting por IP de origem
       "nginx.ingress.kubernetes.io/limit-rps"         = tostring(var.nginx_rate_limit_rps)
@@ -111,11 +106,9 @@ resource "kubernetes_ingress_v1" "grafana" {
       "nginx.ingress.kubernetes.io/ssl-redirect"       = "true"
       "nginx.ingress.kubernetes.io/force-ssl-redirect" = "true"
 
-      # WAF e rate limiting
-      "nginx.ingress.kubernetes.io/enable-modsecurity"      = tostring(var.nginx_enable_modsecurity)
-      "nginx.ingress.kubernetes.io/enable-owasp-core-rules" = tostring(var.nginx_enable_modsecurity)
-      "nginx.ingress.kubernetes.io/limit-rps"               = tostring(var.nginx_rate_limit_rps)
-      "nginx.ingress.kubernetes.io/limit-connections"        = tostring(var.nginx_rate_limit_connections)
+      # Rate limiting por IP de origem
+      "nginx.ingress.kubernetes.io/limit-rps"        = tostring(var.nginx_rate_limit_rps)
+      "nginx.ingress.kubernetes.io/limit-connections" = tostring(var.nginx_rate_limit_connections)
 
       # Segurança extra para o dashboard de monitoramento
       "nginx.ingress.kubernetes.io/configuration-snippet" = <<-SNIPPET
